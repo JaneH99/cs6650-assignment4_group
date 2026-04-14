@@ -75,12 +75,15 @@ public class SessionRegistry {
 
     TextMessage message = new TextMessage(json);
     for (WebSocketSession session : sessions) {
-      if (session.isOpen()) {
+      if (!session.isOpen()) continue;
+      synchronized (session) {
         try {
-          // synchronized guards against concurrent sends, in real application
-          synchronized (session) {
-            session.sendMessage(message);
-          }
+          session.sendMessage(message);
+        } catch (IllegalStateException e) {
+          // Thrown when the remote endpoint is mid-send (TEXT_PARTIAL_WRITING).
+          // Log and drop — the client will reconnect if needed.
+          log.warn("Session {} in invalid state during send, skipping: {}",
+              session.getId(), e.getMessage());
         } catch (IOException e) {
           log.warn("Failed to send to session {}: {}", session.getId(), e.getMessage());
         }

@@ -1,7 +1,5 @@
 package service;
 
-import com.google.gson.Gson;
-import com.rabbitmq.client.Channel;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -12,16 +10,21 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import model.BroadcastMessage;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.RedisStringCommands;
 import org.springframework.data.redis.connection.StringRedisConnection;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.types.Expiration;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+
+import com.google.gson.Gson;
+import com.rabbitmq.client.Channel;
+
 import db.MessageBuffer;
+import model.BroadcastMessage;
 import redis.RedisPublisher;
 
 /**

@@ -11,6 +11,7 @@ import java.util.UUID;
 import model.BroadcastMessage;
 import model.ClientMessage;
 import mq.ChannelPool;
+import mq.DualChannelPool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,22 +19,24 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.socket.WebSocketSession;
 
 /**
- * Service for publishing messages to RabbitMQ using a pool of reusable channels.
- * A circuit breaker (configured in application.properties) is applied to prevent
- * failures when RabbitMQ is unavailable.
+ * Service for publishing messages to RabbitMQ.
+ * Routes messages to the correct ChannelPool based on roomId:
+ *   rooms 1-10  → RabbitMQ-1 (pool1)
+ *   rooms 11-20 → RabbitMQ-2 (pool2)
+ * A circuit breaker prevents publishing when RabbitMQ is unavailable.
  */
 @Service
 public class MessagePublisher {
 
   private static final Logger log = LoggerFactory.getLogger(MessagePublisher.class);
 
-  private final ChannelPool channelPool;
+  private final DualChannelPool channelPool;
   private final Gson gson = new Gson();
 
   @Value("${server.id:producer-1}")
   private String serverId;
 
-  public MessagePublisher(ChannelPool channelPool) {
+  public MessagePublisher(DualChannelPool channelPool) {
     this.channelPool = channelPool;
   }
 
@@ -42,7 +45,6 @@ public class MessagePublisher {
     ClientMessage clientMsg = gson.fromJson(rawJson, ClientMessage.class);
 
     BroadcastMessage broadcast = new BroadcastMessage();
-//    Make sure each message has an id
     broadcast.setMessageId(
         clientMsg.getMessageId() != null ? clientMsg.getMessageId() : UUID.randomUUID().toString());
     broadcast.setRoomId(roomId);
@@ -60,8 +62,10 @@ public class MessagePublisher {
     String json = gson.toJson(broadcast);
     String routingKey = "room." + roomId;
 
-//    Borrow a channel, publish message, return channel
-    Channel channel = channelPool.borrowChannel();
+    int roomNum = Integer.parseInt(roomId);
+    ChannelPool pool = channelPool.forRoom(roomNum);
+
+    Channel channel = pool.borrowChannel();
     try {
       channel.basicPublish(
           RabbitMQConfig.EXCHANGE_NAME,
@@ -70,7 +74,7 @@ public class MessagePublisher {
           json.getBytes(StandardCharsets.UTF_8));
       log.debug("Published: messageId={} room={}", broadcast.getMessageId(), roomId);
     } finally {
-      channelPool.returnChannel(channel);
+      pool.returnChannel(channel);
     }
   }
 
