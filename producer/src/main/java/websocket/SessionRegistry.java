@@ -1,6 +1,5 @@
 package websocket;
 
-import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Set;
@@ -8,12 +7,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import model.UserInfo;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
+
+import jakarta.annotation.PreDestroy;
+import model.UserInfo;
 
 /**
  * This class is a Spring-managed singleton bean and is initialized at application startup.
@@ -78,7 +80,11 @@ public class SessionRegistry {
       if (!session.isOpen()) continue;
       synchronized (session) {
         try {
-          session.sendMessage(message);
+          synchronized (session) {
+            if (session.isOpen()) {
+              session.sendMessage(message);
+            }
+          }
         } catch (IllegalStateException e) {
           // Thrown when the remote endpoint is mid-send (TEXT_PARTIAL_WRITING).
           // Log and drop — the client will reconnect if needed.

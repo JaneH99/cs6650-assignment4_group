@@ -13,6 +13,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.RedisStringCommands;
 import org.springframework.data.redis.connection.StringRedisConnection;
@@ -36,6 +38,10 @@ import redis.RedisPublisher;
  * With manual ACK and NACK, it ensures At-least-once delivery
  * Called from RoomConsumer on a dedicated AMQP consumer thread per channel.
  * Thread-safe: AtomicLong counters, stateless dependencies.
+ *
+ * Sharded architecture:
+ *   - Rooms 1-10 → DB1 (db1Buffer)
+ *   - Rooms 11-20 → DB2 (db2Buffer)
  */
 @Service
 public class MessageProcessingService {
@@ -47,7 +53,8 @@ public class MessageProcessingService {
   private static final Duration DEDUP_TTL = Duration.ofMinutes(5);
 
   private final RedisPublisher redisPublisher;
-  private final MessageBuffer messageBuffer;
+  private final MessageBuffer db1Buffer;
+  private final MessageBuffer db2Buffer;
   private final StringRedisTemplate redisTemplate;
   private final Gson gson = new Gson();
 
@@ -65,10 +72,15 @@ public class MessageProcessingService {
   private final AtomicLong lagSumMs = new AtomicLong(0);
   private final AtomicLong lagCount = new AtomicLong(0);
 
-  public MessageProcessingService(RedisPublisher redisPublisher, MessageBuffer messageBuffer,
+  @Autowired
+  public MessageProcessingService(
+      RedisPublisher redisPublisher,
+      @Qualifier("db1Buffer") MessageBuffer db1Buffer,
+      @Qualifier("db2Buffer") MessageBuffer db2Buffer,
       StringRedisTemplate redisTemplate) {
     this.redisPublisher = redisPublisher;
-    this.messageBuffer = messageBuffer;
+    this.db1Buffer = db1Buffer;
+    this.db2Buffer = db2Buffer;
     this.redisTemplate = redisTemplate;
     startMetricsLogger();
   }
@@ -85,8 +97,8 @@ public class MessageProcessingService {
           long count = lagCount.getAndSet(0);
           long sumMs = lagSumMs.getAndSet(0);
           long avgLag = count > 0 ? sumMs / count : 0;
-          log.info("[METRICS] throughput={}/sec failures={}/sec avgConsumerLag={}ms",
-              msgs / METRICS_INTERVAL_SEC, errs / METRICS_INTERVAL_SEC, avgLag);
+          log.info("[METRICS] throughput={}/sec failures={}/sec avgConsumerLag={}ms db1Queue={} db2Queue={}",
+              msgs / METRICS_INTERVAL_SEC, errs / METRICS_INTERVAL_SEC, avgLag, db1Buffer.size(), db2Buffer.size());
         }, METRICS_INTERVAL_SEC, METRICS_INTERVAL_SEC, TimeUnit.SECONDS);
   }
 
@@ -143,25 +155,15 @@ public class MessageProcessingService {
       processed.addAndGet(messages.size());
       recentProcessed.addAndGet(messages.size());
 
-      // Write-behind: push to DB buffer after ACK — DB writes are decoupled from this thread
+      // Write-behind: push to correct DB buffer based on roomId
       for (BroadcastMessage msg : messages) {
-        // Back-pressure: block consumer thread until buffer has space (may cause RabbitMQ memory alarm under high load - in Endurance Test)
-        // It is used for 1,000,000 load test to make sure all messages write to DB
-        // try {
-        //   if (!messageBuffer.offer(msg, 2000, TimeUnit.MILLISECONDS)) {
-        //     log.warn("DB buffer full after 2s — dropping message_id={}", msg.getMessageId());
-        //   }
-        // } catch (InterruptedException ie) {
-        //   Thread.currentThread().interrupt();
-        //   break;
-        // }
-        if (!messageBuffer.offer(msg)) {
+        MessageBuffer targetBuffer = getBufferForRoom(msg.getRoomId());
+        if (!targetBuffer.offer(msg)) {
           log.warn("DB buffer full — dropping message_id={}", msg.getMessageId());
         }
       }
 
       // Consumer lag: time from first message received (handleDelivery) → Redis publish done
-      // Measures: batch buffer wait + deserialization + Redis publish.
       long lagMs = System.currentTimeMillis() - batchReceiveTime;
       lagSumMs.addAndGet(lagMs * messages.size());
       lagCount.addAndGet(messages.size());
@@ -171,6 +173,20 @@ public class MessageProcessingService {
       failures.addAndGet(bodies.size());
       recentFailures.addAndGet(bodies.size());
       batchNackWithBackoff(channel, lastTag);
+    }
+  }
+
+  /**
+   * Routes message to the correct buffer based on roomId.
+   * Rooms 1-10 → db1Buffer (DB1)
+   * Rooms 11-20 → db2Buffer (DB2)
+   */
+  private MessageBuffer getBufferForRoom(String roomId) {
+    try {
+      int room = Integer.parseInt(roomId);
+      return (room >= 1 && room <= 10) ? db1Buffer : db2Buffer;
+    } catch (NumberFormatException e) {
+      return db1Buffer; // Default to DB1 for unknown rooms
     }
   }
 
@@ -193,12 +209,8 @@ public class MessageProcessingService {
 
   /**
    * Removes duplicates from both lists using a Redis pipeline.
-   * Pipeline sends all SETNX commands in one round trip, returns true/false per message.
-   * Filter both lists based on results — only keep messages where SETNX returned true.
-   * TTL is 5 min — long enough to cover any RabbitMQ redelivery window
    */
   private void filterDuplicates(List<BroadcastMessage> messages, List<String> jsons) {
-//    Queue commands locally and send all commands to Redis in one batch
     List<Object> results = redisTemplate.executePipelined(
         (org.springframework.data.redis.core.RedisCallback<Object>) conn -> {
           StringRedisConnection strConn = (StringRedisConnection) conn;
@@ -207,7 +219,7 @@ public class MessageProcessingService {
                 Expiration.seconds(DEDUP_TTL.getSeconds()),
                 RedisStringCommands.SetOption.SET_IF_ABSENT);
           }
-          return null; // return value ignored in pipeline mode
+          return null;
         });
 
     List<BroadcastMessage> dedupedMessages = new ArrayList<>(messages.size());
@@ -228,7 +240,7 @@ public class MessageProcessingService {
 
   private void batchAck(Channel channel, long lastDeliveryTag) {
     try {
-      channel.basicAck(lastDeliveryTag, true);  // multiple=true: ACKs all up to lastDeliveryTag
+      channel.basicAck(lastDeliveryTag, true);
     } catch (IOException e) {
       log.error("Failed to batch ACK up to tag={}", lastDeliveryTag, e);
     }
@@ -236,7 +248,7 @@ public class MessageProcessingService {
 
   private void batchNackWithBackoff(Channel channel, long lastDeliveryTag) {
     try {
-      channel.basicNack(lastDeliveryTag, true, true);  // multiple=true, requeue=true
+      channel.basicNack(lastDeliveryTag, true, true);
     } catch (IOException e) {
       log.error("Failed to batch NACK up to tag={}", lastDeliveryTag, e);
     }
