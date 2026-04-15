@@ -1,7 +1,6 @@
 -- CS6650 Assignment 3 Schema
 -- Run this once against PostgreSQL instance before starting the consumer
-
-CREATE DATABASE chatdb;
+-- Note: chatdb database is created automatically by docker-compose
 
 CREATE TABLE IF NOT EXISTS messages (
     message_id  VARCHAR(255) PRIMARY KEY,
