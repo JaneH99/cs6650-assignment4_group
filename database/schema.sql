@@ -1,8 +1,6 @@
 -- CS6650 Assignment 3 Schema
 -- Run this once against PostgreSQL instance before starting the consumer
 
-CREATE DATABASE chatdb;
-
 CREATE TABLE IF NOT EXISTS messages (
     message_id  VARCHAR(255) PRIMARY KEY,
     room_id     VARCHAR(255) NOT NULL,
@@ -12,8 +10,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 -- Supports: get messages for a room in time range (Query 1)
-CREATE INDEX IF NOT EXISTS idx_messages_room_timestamp
-    ON messages (room_id, timestamp);
+CREATE INDEX idx_messages_room_timestamp ON messages (room_id, timestamp);
 
 -- Supports: user message history (Query 2) + rooms per user (Query 4)
 CREATE INDEX IF NOT EXISTS idx_messages_user_room_timestamp

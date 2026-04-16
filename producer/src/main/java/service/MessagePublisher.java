@@ -21,6 +21,20 @@ import org.springframework.web.socket.WebSocketSession;
  * Service for publishing messages to RabbitMQ using a pool of reusable channels.
  * A circuit breaker (configured in application.properties) is applied to prevent
  * failures when RabbitMQ is unavailable.
+ *
+ * Queue partitioning optimization:
+ *   The routing key is computed as "room.{roomId}.p.{partition}" where partition
+ *   is derived from hash(userId) % partitionsPerRoom. This ensures:
+ *   1. Messages from the same user always go to the same partition (stable routing).
+ *   2. Multiple partitions in one room can be consumed in parallel by different
+ *      consumer channels, increasing throughput for hot rooms.
+ *
+ * Ordering trade-off:
+ *   Per-user ordering is preserved because the same userId always maps to the
+ *   same partition, and each partition is consumed serially by one channel.
+ *   Cross-user global ordering is not guaranteed — identical to Kafka's
+ *   per-partition ordering semantic — and is acceptable for a high-throughput
+ *   chat system where latency matters more than strict interleaving order.
  */
 @Service
 public class MessagePublisher {
@@ -29,6 +43,10 @@ public class MessagePublisher {
 
   private final ChannelPool channelPool;
   private final Gson gson = new Gson();
+
+  // Must match the value declared in producer RabbitMQConfig and consumer RabbitMQConfig
+  @Value("${rabbitmq.partitions.per.room:3}")
+  private int partitionsPerRoom;
 
   @Value("${server.id:producer-1}")
   private String serverId;
@@ -42,9 +60,10 @@ public class MessagePublisher {
     ClientMessage clientMsg = gson.fromJson(rawJson, ClientMessage.class);
 
     BroadcastMessage broadcast = new BroadcastMessage();
-//    Make sure each message has an id
     broadcast.setMessageId(
-        clientMsg.getMessageId() != null ? clientMsg.getMessageId() : UUID.randomUUID().toString());
+            clientMsg.getMessageId() != null
+                    ? clientMsg.getMessageId()
+                    : UUID.randomUUID().toString());
     broadcast.setRoomId(roomId);
     broadcast.setUserId(clientMsg.getUserId());
     broadcast.setUsername(clientMsg.getUsername());
@@ -53,30 +72,37 @@ public class MessagePublisher {
     broadcast.setTimestamp(Instant.now().toString());
     broadcast.setServerId(serverId);
     String clientIp = (session.getRemoteAddress() != null)
-        ? ((java.net.InetSocketAddress) session.getRemoteAddress()).getAddress().getHostAddress()
-        : "unknown";
+            ? ((java.net.InetSocketAddress) session.getRemoteAddress())
+            .getAddress().getHostAddress()
+            : "unknown";
     broadcast.setClientIp(clientIp);
 
     String json = gson.toJson(broadcast);
-    String routingKey = "room." + roomId;
 
-//    Borrow a channel, publish message, return channel
+    // Partition selection: Math.abs guards against negative hashCode values.
+    // Same userId always maps to the same partition, preserving per-user
+    // message order within a partition while allowing cross-partition
+    // parallelism across users in the same room.
+    int partition = Math.abs(clientMsg.getUserId().hashCode()) % partitionsPerRoom;
+    String routingKey = "room." + roomId + ".p." + partition;
+
     Channel channel = channelPool.borrowChannel();
     try {
       channel.basicPublish(
-          RabbitMQConfig.EXCHANGE_NAME,
-          routingKey,
-          MessageProperties.BASIC,
-          json.getBytes(StandardCharsets.UTF_8));
-      log.debug("Published: messageId={} room={}", broadcast.getMessageId(), roomId);
+              RabbitMQConfig.EXCHANGE_NAME,
+              routingKey,
+              MessageProperties.BASIC,
+              json.getBytes(StandardCharsets.UTF_8));
+      log.debug("Published: messageId={} room={} partition={}",
+              broadcast.getMessageId(), roomId, partition);
     } finally {
       channelPool.returnChannel(channel);
     }
   }
 
-  // Called when circuit is OPEN or when publish throws
   public void publishFallback(String roomId, WebSocketSession session, String rawJson,
-      Exception e) {
-    log.error("RabbitMQ circuit open — message dropped: room={} error={}", roomId, e.getMessage());
+                              Exception e) {
+    log.error("RabbitMQ circuit open — message dropped: room={} error={}",
+            roomId, e.getMessage());
   }
 }

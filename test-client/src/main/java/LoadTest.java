@@ -38,8 +38,8 @@ public class LoadTest {
 //  public static final int TOTAL_COUNT = 1_000_000;
   public static final int NUM_OF_CHAT_ROOMS = 20;
   public static final int DEFAULT_MAIN_PHASE_THREAD = 32;
-  public static final String DEFAULT_SERVER_URI = "ws://localhost:8080/chat/";
-  public static final String DEFAULT_METRICS_URL = "http://localhost:8081/metrics";
+  public static final String DEFAULT_SERVER_URI = "ws://producer:8080/chat/";
+  public static final String DEFAULT_METRICS_URL = "http://consumer:8081/metrics";
   public static final ConnectionManager connectionManager = ConnectionManager.getInstance();
 
   public static void main(String[] args) throws Exception {

@@ -15,9 +15,14 @@ import service.MessageProcessingService;
 /**
  * Configures RabbitMQ topology and the RoomConsumer bean.
  *
- * Topology is declared Idempotently on startup.
- * Both Message Consumer and Message Producer declare the same exchange/queues with the same args, so whichever
- * starts first wins; the second is a no-op. If it is manually or automatically declared in RabbitMQ, both of them will be no-op
+ * Topology is declared idempotently on startup.
+ * Both consumer and producer declare the same exchange/queues with the same args,
+ * so whichever starts first wins; the second is a no-op.
+ *
+ * Queue partitioning optimization:
+ *   Each room is split into partitionsPerRoom queues named "room.{id}.p.{n}".
+ *   This allows multiple consumer channels to process one room in parallel,
+ *   increasing throughput for hot rooms.
  */
 @Configuration
 public class RabbitMQConfig {
@@ -54,16 +59,18 @@ public class RabbitMQConfig {
   @Value("${rabbitmq.consumer.prefetch:20}")
   private int prefetchCount;
 
-  /**
-   * Declares topology (exchange + queues + bindings) using a temporary connection.
-   * Separate from the consumer connection so startup failures are isolated.
-   * Make sure everything is declared before RoomConsumer starts
-   */
+  // Must match the value in producer RabbitMQConfig and MessagePublisher
+  @Value("${rabbitmq.partitions.per.room:3}")
+  private int partitionsPerRoom;
+
   @Bean
   public RoomConsumer roomConsumer(MessageProcessingService processingService) throws Exception {
     declareTopology();
     return new RoomConsumer(host, username, password,
-        consumerThreads, prefetchCount, numRooms, roomsStart, roomsEnd, processingService);
+            consumerThreads, prefetchCount, numRooms,
+            roomsStart, roomsEnd,
+            partitionsPerRoom,
+            processingService);
   }
 
   private void declareTopology() throws Exception {
@@ -72,7 +79,6 @@ public class RabbitMQConfig {
     factory.setUsername(username);
     factory.setPassword(password);
 
-//    With try with resource, both connection and channel are auto-closable
     try (Connection conn = factory.newConnection("topology-init");
          Channel channel = conn.createChannel()) {
 
@@ -82,11 +88,15 @@ public class RabbitMQConfig {
       args.put("x-message-ttl", messageTtl);
       args.put("x-max-length", maxLength);
 
-      for (int roomId = 1; roomId <= numRooms; roomId++) {
-        String queueName  = "room." + roomId;
-        String routingKey = "room." + roomId;
-        channel.queueDeclare(queueName, true, false, false, args);
-        channel.queueBind(queueName, EXCHANGE_NAME, routingKey);
+      // Each room gets partitionsPerRoom queues instead of one.
+      // Total queues = numRooms * partitionsPerRoom (e.g. 20 * 3 = 60)
+      for (int roomId = roomsStart; roomId <= roomsEnd; roomId++) {
+        for (int p = 0; p < partitionsPerRoom; p++) {
+          String queueName  = "room." + roomId + ".p." + p;
+          String routingKey = "room." + roomId + ".p." + p;
+          channel.queueDeclare(queueName, true, false, false, args);
+          channel.queueBind(queueName, EXCHANGE_NAME, routingKey);
+        }
       }
     }
   }

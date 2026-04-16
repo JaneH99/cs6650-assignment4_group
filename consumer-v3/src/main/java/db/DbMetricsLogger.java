@@ -13,12 +13,15 @@ import org.springframework.stereotype.Component;
 /**
  * Periodically queries PostgreSQL system views to collect database metrics:
  * - Queries per second
- * Active connections
- * Lock wait time
- * Buffer pool hit ratio
- * Disk I/O statistics
+ * - Active connections
+ * - Lock wait time
+ * - Buffer pool hit ratio
+ * - Disk I/O statistics
  *
  * Only runs when db.metrics.enabled=true.
+ *
+ * Compatible with PostgreSQL 15 (pg_stat_checkpointer does not exist in PG15,
+ * checkpoint stats are read from pg_stat_bgwriter instead).
  */
 @Component
 public class DbMetricsLogger {
@@ -30,7 +33,7 @@ public class DbMetricsLogger {
   private final int intervalSec;
 
   private final ScheduledExecutorService scheduler =
-      Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "db-metrics-logger"));
+          Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "db-metrics-logger"));
 
   // Previous counters for delta calculations
   private long prevXactCommit    = -1;
@@ -43,9 +46,9 @@ public class DbMetricsLogger {
   private long prevBufBackend    = -1;
 
   public DbMetricsLogger(
-      JdbcTemplate jdbc,
-      @Value("${db.metrics.enabled:false}") boolean enabled,
-      @Value("${db.metrics.interval-sec:30}") int intervalSec) {
+          JdbcTemplate jdbc,
+          @Value("${db.metrics.enabled:false}") boolean enabled,
+          @Value("${db.metrics.interval-sec:30}") int intervalSec) {
     this.jdbc = jdbc;
     this.enabled = enabled;
     this.intervalSec = intervalSec;
@@ -73,16 +76,16 @@ public class DbMetricsLogger {
       // Active connections
       // -------------------------------
       Integer activeConns = jdbc.queryForObject(
-          "SELECT COUNT(*) FROM pg_stat_activity WHERE state = 'active'",
-          Integer.class);
+              "SELECT COUNT(*) FROM pg_stat_activity WHERE state = 'active'",
+              Integer.class);
 
       // -------------------------------
       // Lock wait (point-in-time)
       // -------------------------------
       Map<String, Object> lockStats = jdbc.queryForMap(
-          "SELECT COALESCE(MAX(EXTRACT(EPOCH FROM (NOW() - state_change)) * 1000), 0) as max_lock_wait_ms, " +
-          "COALESCE(AVG(EXTRACT(EPOCH FROM (NOW() - state_change)) * 1000), 0) as avg_lock_wait_ms " +
-          "FROM pg_stat_activity WHERE wait_event_type = 'Lock'");
+              "SELECT COALESCE(MAX(EXTRACT(EPOCH FROM (NOW() - state_change)) * 1000), 0) as max_lock_wait_ms, " +
+                      "COALESCE(AVG(EXTRACT(EPOCH FROM (NOW() - state_change)) * 1000), 0) as avg_lock_wait_ms " +
+                      "FROM pg_stat_activity WHERE wait_event_type = 'Lock'");
       long maxLockWaitMs = toLong(lockStats.get("max_lock_wait_ms"));
       long avgLockWaitMs = toLong(lockStats.get("avg_lock_wait_ms"));
 
@@ -90,9 +93,9 @@ public class DbMetricsLogger {
       // Core DB stats
       // -------------------------------
       Map<String, Object> dbStats = jdbc.queryForMap(
-          "SELECT blks_hit, blks_read, xact_commit, xact_rollback, " +
-          "       blk_read_time, blk_write_time " +
-          "FROM pg_stat_database WHERE datname = current_database()");
+              "SELECT blks_hit, blks_read, xact_commit, xact_rollback, " +
+                      "       blk_read_time, blk_write_time " +
+                      "FROM pg_stat_database WHERE datname = current_database()");
 
       // Number of buffer hits (reads served from PostgreSQL shared buffer cache).
       long blksHit      = toLong(dbStats.get("blks_hit"));
@@ -111,18 +114,13 @@ public class DbMetricsLogger {
       long deltaCommit    = prevXactCommit   >= 0 ? xactCommit   - prevXactCommit   : 0;
       long deltaRollback  = prevXactRollback >= 0 ? xactRollback - prevXactRollback : 0;
       long deltaBlksRead  = prevBlksRead     >= 0 ? blksRead     - prevBlksRead     : 0;
-      long deltaReadTime  = prevBlkReadTime  >= 0 ? blkReadTime  - prevBlkReadTime  : 0;
       long deltaWriteTime = prevBlkWriteTime >= 0 ? blkWriteTime - prevBlkWriteTime : 0;
 
-      // QPS (transactions per second):
-      // Measures total number of database transactions completed per second
-      // This reflects overall database workload
+      // QPS (transactions per second)
       long   qps         = (deltaCommit + deltaRollback) / intervalSec;
       // Disk read throughput (blocks per second)
-      // Higher values indicate more physical I/O demand and less cache efficiency.
       long   readsPerSec = deltaBlksRead / intervalSec;
-      // Buffer cache hit ratio (%):
-      // Percentage of data access served from shared buffer cache instead of disk.
+      // Buffer cache hit ratio (%)
       double hitRatio    = (blksHit + blksRead) > 0 ? blksHit * 100.0 / (blksHit + blksRead) : 0;
 
       prevXactCommit   = xactCommit;
@@ -132,32 +130,26 @@ public class DbMetricsLogger {
       prevBlkWriteTime = blkWriteTime;
 
       // -------------------------------
-      // bgwriter stats
+      // bgwriter / checkpoint stats
+      // PG15: pg_stat_checkpointer 不存在，checkpoint 数据在 pg_stat_bgwriter 里
+      // PG17: pg_stat_checkpointer 独立出来，pg_stat_bgwriter 里不再有这些字段
+      // 这里用 pg_stat_bgwriter 兼容 PG15
       // -------------------------------
       Map<String, Object> bgWriter = jdbc.queryForMap(
-          "SELECT buffers_clean FROM pg_stat_bgwriter");
+              "SELECT buffers_clean, buffers_checkpoint, checkpoints_timed, checkpoints_req " +
+                      "FROM pg_stat_bgwriter");
 
-      Map<String, Object> checkpointer = jdbc.queryForMap(
-          "SELECT buffers_written, num_timed, num_requested " +
-          "FROM pg_stat_checkpointer");
-
-      // buffers_backend moved to pg_stat_io in PostgreSQL 17
-      Map<String, Object> ioStats = jdbc.queryForMap(
-          "SELECT COALESCE(SUM(writes), 0) AS buffers_backend FROM pg_stat_io " +
-          "WHERE backend_type = 'client backend' AND object = 'relation'");
-
-      // Number of buffers written by checkpoints.
-      long bufCheckpoint    = toLong(checkpointer.get("buffers_written"));
-      // Number of buffers written by the background writer process.
+      // buffers_backend 在 PG15 也在 pg_stat_bgwriter 里
+      long bufCheckpoint    = toLong(bgWriter.get("buffers_checkpoint"));
       long bufClean         = toLong(bgWriter.get("buffers_clean"));
-      // Number of buffers written by backend processes (user queries).
-      long bufBackend       = toLong(ioStats.get("buffers_backend"));
-      // Number of checkpoints triggered because checkpoint_timeout elapsed.
-      long checkpointsTimed = toLong(checkpointer.get("num_timed"));
-      // Number of checkpoints triggered because WAL volume required an immediate checkpoint.
-      long checkpointsReq   = toLong(checkpointer.get("num_requested"));
+      long checkpointsTimed = toLong(bgWriter.get("checkpoints_timed"));
+      long checkpointsReq   = toLong(bgWriter.get("checkpoints_req"));
 
-      // Compute deltas before updating prev values
+      // buffers_backend: PG15 在 pg_stat_bgwriter，PG17 移到了 pg_stat_io
+      // 用 CASE WHEN 动态兼容两个版本
+      long bufBackend = queryBuffersBackendCompat();
+
+      // Compute deltas
       long buffersCheckpoint = prevBufCheckpoint >= 0 ? bufCheckpoint - prevBufCheckpoint : 0;
       long buffersClean      = prevBufClean      >= 0 ? bufClean      - prevBufClean      : 0;
       long buffersBackend    = prevBufBackend    >= 0 ? bufBackend    - prevBufBackend    : 0;
@@ -166,21 +158,20 @@ public class DbMetricsLogger {
       prevBufClean      = bufClean;
       prevBufBackend    = bufBackend;
 
-      // Write latency: total buffers written to disk during the interval
+      // Write latency
       long   totalBufsWritten = buffersCheckpoint + buffersClean + buffersBackend;
       double writeLatencyMs   = totalBufsWritten > 0 ? deltaWriteTime * 1.0 / totalBufsWritten : 0;
 
-      // Backend write pressure: high % = application queries (backends) are forced to flush dirty pages
-      // (I/O saturation) themselves instead of the background writer handling it
+      // Backend write pressure
       double backendWriteRatio = (buffersClean + buffersBackend) > 0
-          ? buffersBackend * 100.0 / (buffersClean + buffersBackend)
-          : 0;
+              ? buffersBackend * 100.0 / (buffersClean + buffersBackend)
+              : 0;
 
       // -------------------------------
       // Disk size + JVM heap
       // -------------------------------
       String dbSize = jdbc.queryForObject(
-          "SELECT pg_size_pretty(pg_database_size(current_database()))", String.class);
+              "SELECT pg_size_pretty(pg_database_size(current_database()))", String.class);
 
       Runtime rt = Runtime.getRuntime();
       long heapUsedMb = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024);
@@ -189,16 +180,42 @@ public class DbMetricsLogger {
       // Log
       // -------------------------------
       log.info("[DB IO] qps={} hitRatio={}% activeConns={} lockWaitAvgMs={} lockWaitMaxMs={} dbSize={} heapUsed={}MB",
-          qps, String.format("%.2f", hitRatio), activeConns, avgLockWaitMs, maxLockWaitMs, dbSize, heapUsedMb);
+              qps, String.format("%.2f", hitRatio), activeConns, avgLockWaitMs, maxLockWaitMs, dbSize, heapUsedMb);
 
       log.info("[DB IO DISK] writeLatencyMs={} buffersClean={} buffersBackend={} backendWriteRatio={}% buffersCheckpoint={} checkpointsTimed={} checkpointsReq={}",
-          String.format("%.2f", writeLatencyMs),
-          buffersClean, buffersBackend,
-          String.format("%.1f", backendWriteRatio),
-          buffersCheckpoint, checkpointsTimed, checkpointsReq);
+              String.format("%.2f", writeLatencyMs),
+              buffersClean, buffersBackend,
+              String.format("%.1f", backendWriteRatio),
+              buffersCheckpoint, checkpointsTimed, checkpointsReq);
 
     } catch (Exception e) {
       log.warn("[DB IO] Failed to collect: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * 兼容 PG15 和 PG17 读取 buffers_backend。
+   * PG15: buffers_backend 在 pg_stat_bgwriter
+   * PG17: buffers_backend 移到了 pg_stat_io，pg_stat_bgwriter 里该列已删除
+   */
+  private long queryBuffersBackendCompat() {
+    try {
+      // 先尝试 PG17 的 pg_stat_io（PG15 没有此视图，会抛异常）
+      Long val = jdbc.queryForObject(
+              "SELECT COALESCE(SUM(writes), 0) FROM pg_stat_io " +
+                      "WHERE backend_type = 'client backend' AND object = 'relation'",
+              Long.class);
+      return val != null ? val : 0L;
+    } catch (Exception e) {
+      // 降级到 PG15 的 pg_stat_bgwriter
+      try {
+        Map<String, Object> row = jdbc.queryForMap(
+                "SELECT buffers_backend FROM pg_stat_bgwriter");
+        return toLong(row.get("buffers_backend"));
+      } catch (Exception ex) {
+        log.warn("[DB IO] Could not read buffers_backend: {}", ex.getMessage());
+        return 0L;
+      }
     }
   }
 
