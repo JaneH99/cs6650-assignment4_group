@@ -40,3 +40,7 @@ Thumbs.db
 *.tmp
 *.swp
 
+consumer-v3/Dockerfile
+docker-compose.yml
+producer/Dockerfile
+test-client/Dockerfile
