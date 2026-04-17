@@ -17,6 +17,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import db.DatabaseWriter;
 import db.MessageBuffer;
 import db.MessageRepository;
+<<<<<<< HEAD
 import model.BroadcastMessage;
 
 /**
@@ -24,6 +25,13 @@ import model.BroadcastMessage;
  *
  * DB1 (rooms 1-10): db1DataSource + jdbcTemplate + messageRepository1 + buffer1 + writer1
  * DB2 (rooms 11-20): db2DataSource + jdbc2Template + messageRepository2 + buffer2 + writer2
+=======
+
+/**
+ * Multi-database configuration for the Consumer service.
+ * DB1 (rooms 1-10): db1DataSource + jdbcTemplate + messageRepository1
+ * DB2 (rooms 11-20): db2DataSource + jdbc2Template + messageRepository2
+>>>>>>> final
  */
 @Configuration
 public class DataSourceConfig {
@@ -134,18 +142,26 @@ public class DataSourceConfig {
   }
 
   // ======================== Dual Buffer Configuration ========================
+<<<<<<< HEAD
   // Room 1-10 → buffer1 → writer1 → db1
   // Room 11-20 → buffer2 → writer2 → db2
+=======
+>>>>>>> final
 
   @Bean(name = "buffer1")
   public MessageBuffer buffer1() {
     log.info("Creating buffer1 (rooms 1-10) with capacity={}", bufferCapacity);
+<<<<<<< HEAD
     return new MessageBuffer(bufferCapacity);
+=======
+    return new MessageBuffer(bufferCapacity, "buffer1");
+>>>>>>> final
   }
 
   @Bean(name = "buffer2")
   public MessageBuffer buffer2() {
     log.info("Creating buffer2 (rooms 11-20) with capacity={}", bufferCapacity);
+<<<<<<< HEAD
     return new MessageBuffer(bufferCapacity);
   }
 
@@ -173,6 +189,12 @@ public class DataSourceConfig {
 
   // ======================== Router Configuration ========================
   // Provides unified access to both buffers with room-based routing
+=======
+    return new MessageBuffer(bufferCapacity, "buffer2");
+  }
+
+  // ======================== Router Buffer ========================
+>>>>>>> final
 
   @Bean
   public MessageBuffer routerMessageBuffer(
@@ -189,18 +211,27 @@ public class DataSourceConfig {
     private final MessageBuffer buffer2;
 
     public RouterMessageBuffer(MessageBuffer buffer1, MessageBuffer buffer2) {
+<<<<<<< HEAD
       super(Integer.MAX_VALUE);
+=======
+      super(Integer.MAX_VALUE, "router");
+>>>>>>> final
       this.buffer1 = buffer1;
       this.buffer2 = buffer2;
     }
 
     @Override
+<<<<<<< HEAD
     public boolean offer(BroadcastMessage message) {
       int roomNum = extractRoomNumber(message.getRoomId());
       if (log.isDebugEnabled()) {
         log.debug("[ROUTING] roomId={} extractedRoomNum={} → {}",
             message.getRoomId(), roomNum, (roomNum >= 1 && roomNum <= 10) ? "buffer1/db1" : "buffer2/db2");
       }
+=======
+    public boolean offer(model.BroadcastMessage message) {
+      int roomNum = extractRoomNumber(message.getRoomId());
+>>>>>>> final
       if (roomNum >= 1 && roomNum <= 10) {
         return buffer1.offer(message);
       } else {
@@ -209,13 +240,21 @@ public class DataSourceConfig {
     }
 
     @Override
+<<<<<<< HEAD
     public BroadcastMessage poll(long timeoutMs, java.util.concurrent.TimeUnit unit)
+=======
+    public model.BroadcastMessage poll(long timeoutMs, java.util.concurrent.TimeUnit unit)
+>>>>>>> final
         throws InterruptedException {
       throw new UnsupportedOperationException("poll() not supported on router buffer");
     }
 
     @Override
+<<<<<<< HEAD
     public int drainTo(java.util.List<BroadcastMessage> target, int maxElements) {
+=======
+    public int drainTo(java.util.List<model.BroadcastMessage> target, int maxElements) {
+>>>>>>> final
       throw new UnsupportedOperationException("drainTo() not supported on router buffer");
     }
 
@@ -232,11 +271,48 @@ public class DataSourceConfig {
     private int extractRoomNumber(String roomId) {
       if (roomId == null) return -1;
       try {
+<<<<<<< HEAD
         String num = roomId.replace("room", "").replace("-", "");
         return Integer.parseInt(num);
+=======
+        return Integer.parseInt(roomId.replace("room", ""));
+>>>>>>> final
       } catch (NumberFormatException e) {
         return -1;
       }
     }
   }
+<<<<<<< HEAD
+=======
+
+  // ======================== Dual DatabaseWriter Configuration ========================
+
+  @Bean(name = "databaseWriter1")
+  public DatabaseWriter databaseWriter1(
+      @Qualifier("buffer1") MessageBuffer buffer1,
+      @Qualifier("messageRepository1") MessageRepository repository1) {
+    return new DatabaseWriter(
+        buffer1,
+        repository1,
+        writerThreads,
+        batchSize,
+        flushIntervalMs,
+        maxRetries,
+        dbMetricsIntervalSec);
+  }
+
+  @Bean(name = "databaseWriter2")
+  public DatabaseWriter databaseWriter2(
+      @Qualifier("buffer2") MessageBuffer buffer2,
+      @Qualifier("messageRepository2") MessageRepository repository2) {
+    return new DatabaseWriter(
+        buffer2,
+        repository2,
+        writerThreads,
+        batchSize,
+        flushIntervalMs,
+        maxRetries,
+        dbMetricsIntervalSec);
+  }
+>>>>>>> final
 }

@@ -201,6 +201,7 @@ public class DatabaseWriter implements SmartLifecycle {
   }
 
   @Override public boolean isRunning() { return running; }
+  @Override public boolean isAutoStartup() { return true; }
 
   // Starts before RoomConsumer (MAX_VALUE), stops after RoomConsumer so drains buffer last
   @Override public int getPhase() { return Integer.MAX_VALUE - 1; }
