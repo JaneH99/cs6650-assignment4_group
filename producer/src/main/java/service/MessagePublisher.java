@@ -11,7 +11,6 @@ import java.util.UUID;
 import model.BroadcastMessage;
 import model.ClientMessage;
 import mq.ChannelPool;
-import mq.DualChannelPool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -20,9 +19,7 @@ import org.springframework.web.socket.WebSocketSession;
 
 /**
  * Service for publishing messages to RabbitMQ.
- * Routes messages to the correct ChannelPool based on roomId:
- *   rooms 1-10  → RabbitMQ-1 (pool1)
- *   rooms 11-20 → RabbitMQ-2 (pool2)
+ * All messages are published to a single RabbitMQ instance via ChannelPool.
  * A circuit breaker prevents publishing when RabbitMQ is unavailable.
  */
 @Service
@@ -30,13 +27,13 @@ public class MessagePublisher {
 
   private static final Logger log = LoggerFactory.getLogger(MessagePublisher.class);
 
-  private final DualChannelPool channelPool;
+  private final ChannelPool channelPool;
   private final Gson gson = new Gson();
 
   @Value("${server.id:producer-1}")
   private String serverId;
 
-  public MessagePublisher(DualChannelPool channelPool) {
+  public MessagePublisher(ChannelPool channelPool) {
     this.channelPool = channelPool;
   }
 
@@ -62,10 +59,7 @@ public class MessagePublisher {
     String json = gson.toJson(broadcast);
     String routingKey = "room." + roomId;
 
-    int roomNum = Integer.parseInt(roomId);
-    ChannelPool pool = channelPool.forRoom(roomNum);
-
-    Channel channel = pool.borrowChannel();
+    Channel channel = channelPool.borrowChannel();
     try {
       channel.basicPublish(
           RabbitMQConfig.EXCHANGE_NAME,
@@ -74,7 +68,7 @@ public class MessagePublisher {
           json.getBytes(StandardCharsets.UTF_8));
       log.debug("Published: messageId={} room={}", broadcast.getMessageId(), roomId);
     } finally {
-      pool.returnChannel(channel);
+      channelPool.returnChannel(channel);
     }
   }
 

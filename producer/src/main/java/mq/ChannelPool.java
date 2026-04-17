@@ -12,21 +12,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Manages a fixed pool of AMQP channels over a single shared Connection.
- * Channels are borrowed before publish and returned immediately after.
- *
- * Pool size should be set to numRooms * partitionsPerRoom so every
- * partition has a dedicated channel available without contention.
- * Default: 20 rooms * 3 partitions = 60 channels.
+ * A single Connection is shared; channels are borrowed before publish
+ * and returned immediately.
  *
  * closeAll() is called by Spring on shutdown via destroyMethod.
  */
 public class ChannelPool {
 
   private static final Logger log = LoggerFactory.getLogger(ChannelPool.class);
-
-  private static final int  STARTUP_MAX_RETRIES    = 15;
-  private static final long STARTUP_RETRY_DELAY_MS = 3_000;
 
   private volatile Connection connection;
   private final BlockingQueue<Channel> pool;
@@ -35,73 +28,63 @@ public class ChannelPool {
   private static final long BORROW_TIMEOUT_SECONDS = 1;
 
   public ChannelPool(String host, String username, String password, int poolSize)
-          throws IOException, TimeoutException {
+      throws IOException, TimeoutException {
     this.poolSize = poolSize;
     this.pool = new ArrayBlockingQueue<>(poolSize);
     this.factory = new ConnectionFactory();
     factory.setHost(host);
     factory.setUsername(username);
     factory.setPassword(password);
+//    Disable auto-recovery — manual reconnection in ensureConnectionAlive() handles this
     factory.setAutomaticRecoveryEnabled(false);
+//    Fail fast so threads don't pile up behind the synchronized lock when broker is unreachable
     factory.setConnectionTimeout(3000);
-
-    createConnectionWithRetry();
+    createConnection();
     initializePool();
     log.info("ChannelPool initialised: {} channels", poolSize);
   }
 
-  private void createConnectionWithRetry() throws IOException, TimeoutException {
-    int attempt = 0;
-    while (true) {
-      try {
-        attempt++;
-        log.info("Connecting to RabbitMQ (attempt {}/{})...", attempt, STARTUP_MAX_RETRIES);
-        createConnection();
-        log.info("Connected to RabbitMQ successfully.");
-        return;
-      } catch (IOException | TimeoutException e) {
-        if (attempt >= STARTUP_MAX_RETRIES) {
-          log.error("Failed to connect to RabbitMQ after {} attempts, giving up.",
-                  STARTUP_MAX_RETRIES);
-          throw e;
-        }
-        log.warn("RabbitMQ not ready yet ({}), retrying in {}ms...",
-                e.getMessage(), STARTUP_RETRY_DELAY_MS);
-        try {
-          Thread.sleep(STARTUP_RETRY_DELAY_MS);
-        } catch (InterruptedException ie) {
-          Thread.currentThread().interrupt();
-          throw new IOException("Interrupted while waiting for RabbitMQ", ie);
-        }
-      }
-    }
-  }
-
+  /**
+   *  Use synchronized to avoid multiple threads trying to create connections simultaneously when encountering connection failure
+   */
   private synchronized void createConnection() throws IOException, TimeoutException {
     this.connection = factory.newConnection();
   }
 
+  /**
+   *  Initialize connection pool channels
+   */
   private void initializePool() throws IOException {
     for (int i = 0; i < poolSize; i++) {
       pool.add(connection.createChannel());
     }
   }
 
+  /**
+   *   Borrow a channel. wait up to a timeout instead of blocking indefinitely
+   */
   public Channel borrowChannel() throws InterruptedException, IOException, TimeoutException {
     ensureConnectionAlive();
+//    Wait up to BORROW_TIMEOUT_SECONDS instead of blocking indefinitely by using take()
     Channel channel = pool.poll(BORROW_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+//    If cannot borrow a channel, throw exception to inform no available RabbitMQ channel
     if (channel == null) {
       throw new RuntimeException("Timed out waiting for an available RabbitMQ channel");
     }
+//    If channel is not open, create new channel
     if (!channel.isOpen()) {
       channel = connection.createChannel();
     }
     return channel;
   }
 
+  /**
+   *  Return a channel to the pool.
+   */
   public void returnChannel(Channel channel) {
     if (channel != null && channel.isOpen()) {
       boolean returned = pool.offer(channel);
+//      pool is full, close the channel. It happens when a channel is borrowed before reconnection. When it tries to return, initializePool() already filled the pool
       if (!returned) {
         try {
           channel.close();
@@ -110,9 +93,14 @@ public class ChannelPool {
     }
   }
 
+  /**
+   * Ensure connection is open, if no, restart everything
+   */
   private void ensureConnectionAlive() throws IOException, TimeoutException {
+//    If connection is not working, close all and recreate connection and re-initialize channel pool
     if (connection == null || !connection.isOpen()) {
       synchronized (this) {
+//        Double check to avoid duplicate reconnection attempts
         if (connection == null || !connection.isOpen()) {
           closeAll();
           createConnection();
@@ -122,12 +110,19 @@ public class ChannelPool {
     }
   }
 
+  /**
+   * Close all pooled channels and the shared connection.
+   * Called by Spring on application shutdown.
+   */
   public void closeAll() {
     log.info("Closing ChannelPool");
+//    Close all channels
     for (Channel channel : pool) {
       try { channel.close(); } catch (Exception ignored) {}
     }
+//    Clear pool
     pool.clear();
+//    Close connection
     try { connection.close(); } catch (Exception ignored) {}
   }
 }

@@ -19,14 +19,10 @@ public class MetricsRepository {
   private static final Logger log = LoggerFactory.getLogger(MetricsRepository.class);
   private final int topN;
   private final JdbcTemplate jdbc;
-  // Add Materialized View Refresher
-  private final MaterializedViewRefresher mvRefresher;
 
-  public MetricsRepository(JdbcTemplate jdbc, @Value("${metrics.top-n}") int topN,
-      MaterializedViewRefresher mvRefresher) {
+  public MetricsRepository(JdbcTemplate jdbc, @Value("${metrics.top-n}") int topN) {
     this.jdbc = jdbc;
     this.topN = topN;
-    this.mvRefresher = mvRefresher;
   }
 
   // ---- Core Queries ----
@@ -123,41 +119,38 @@ public class MetricsRepository {
 
   /**
    * Analytics 2: Top N most active users by message count.
-   * Reads from mv_top_users (pre-aggregated) instead of scanning messages.
    */
   @Cacheable("topUsers")
   public List<Map<String, Object>> getTopUsers() {
-    log.info("[CACHE MISS] querying top users from materialized view");
+    log.info("[CACHE MISS] querying top users from DB");
     return jdbc.queryForList(
-        "SELECT user_id, message_count FROM mv_top_users " +
-            "ORDER BY message_count DESC LIMIT ?",
+        "SELECT user_id, COUNT(*) as message_count " +
+        "FROM messages GROUP BY user_id ORDER BY message_count DESC LIMIT ?",
         topN);
   }
 
   /**
    * Analytics 3: Top N most active rooms by message count.
-   * Reads from mv_top_rooms (pre-aggregated) instead of scanning messages.
    */
   @Cacheable("topRooms")
   public List<Map<String, Object>> getTopRooms() {
-    log.info("[CACHE MISS] querying top rooms from materialized view");
+    log.info("[CACHE MISS] querying top rooms from DB");
     return jdbc.queryForList(
-        "SELECT room_id, message_count FROM mv_top_rooms " +
-            "ORDER BY message_count DESC LIMIT ?",
+        "SELECT room_id, COUNT(*) as message_count " +
+        "FROM messages GROUP BY room_id ORDER BY message_count DESC LIMIT ?",
         topN);
   }
 
   /**
    * Analytics 4: User participation patterns, interpretered by how many rooms each user participated in
    * and how many messages each user sent in total
-   * Reads from mv_user_participation (pre-aggregated) instead of scanning messages.
    */
   @Cacheable("participationPatterns")
   public List<Map<String, Object>> getUserParticipationPatterns() {
-    log.info("[CACHE MISS] querying user participation patterns from materialized view");
+    log.info("[CACHE MISS] querying user participation patterns from DB");
     return jdbc.queryForList(
-        "SELECT user_id, rooms_count, total_messages FROM mv_user_participation " +
-            "ORDER BY rooms_count DESC LIMIT ?",
+        "SELECT user_id, COUNT(DISTINCT room_id) as rooms_count, COUNT(*) as total_messages " +
+        "FROM messages GROUP BY user_id ORDER BY rooms_count DESC LIMIT ?",
         topN);
   }
 
@@ -171,10 +164,7 @@ public class MetricsRepository {
 
   public void truncate() {
     jdbc.execute("TRUNCATE TABLE messages");
-    // Refresh MVs immediately after truncation so they reflect the empty table.
-    // Uses direct (non-concurrent) refresh since no concurrent readers matter during reset.
-    mvRefresher.refreshAllDirect();
-    log.info("messages table truncated and materialized views refreshed");
+    log.info("messages table truncated");
   }
 
   public long getTotalMessages() {

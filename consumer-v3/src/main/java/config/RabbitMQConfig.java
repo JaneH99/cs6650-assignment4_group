@@ -27,9 +27,6 @@ public class RabbitMQConfig {
   @Value("${spring.rabbitmq.host}")
   private String host;
 
-  @Value("${spring.rabbitmq2.host}")
-  private String host2;
-
   @Value("${spring.rabbitmq.username:guest}")
   private String username;
 
@@ -44,12 +41,6 @@ public class RabbitMQConfig {
 
   @Value("${rabbitmq.rooms.end:20}")
   private int roomsEnd;
-
-  @Value("${rabbitmq.rooms2.start:11}")
-  private int roomsStart2;
-
-  @Value("${rabbitmq.rooms2.end:20}")
-  private int roomsEnd2;
 
   @Value("${rabbitmq.queue.message-ttl:60000}")
   private int messageTtl;
@@ -70,29 +61,28 @@ public class RabbitMQConfig {
    */
   @Bean
   public RoomConsumer roomConsumer(MessageProcessingService processingService) throws Exception {
-    declareTopologyForRange(host, roomsStart, roomsEnd);
-    declareTopologyForRange(host2, roomsStart2, roomsEnd2);
-    return new RoomConsumer(host, host2, username, password,
-        consumerThreads, prefetchCount,
-        roomsStart, roomsEnd, roomsStart2, roomsEnd2,
-        processingService);
+    declareTopology();
+    return new RoomConsumer(host, username, password,
+        consumerThreads, prefetchCount, numRooms, roomsStart, roomsEnd, processingService);
   }
 
-  private void declareTopologyForRange(String targetHost, int start, int end) throws Exception {
+  private void declareTopology() throws Exception {
     ConnectionFactory factory = new ConnectionFactory();
-    factory.setHost(targetHost);
+    factory.setHost(host);
     factory.setUsername(username);
     factory.setPassword(password);
 
+//    With try with resource, both connection and channel are auto-closable
     try (Connection conn = factory.newConnection("topology-init");
          Channel channel = conn.createChannel()) {
+
       channel.exchangeDeclare(EXCHANGE_NAME, BuiltinExchangeType.TOPIC, true);
 
       Map<String, Object> args = new HashMap<>();
       args.put("x-message-ttl", messageTtl);
       args.put("x-max-length", maxLength);
 
-      for (int roomId = start; roomId <= end; roomId++) {
+      for (int roomId = 1; roomId <= numRooms; roomId++) {
         String queueName  = "room." + roomId;
         String routingKey = "room." + roomId;
         channel.queueDeclare(queueName, true, false, false, args);

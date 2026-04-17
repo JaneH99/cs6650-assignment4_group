@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.RedisStringCommands;
 import org.springframework.data.redis.connection.StringRedisConnection;
@@ -65,7 +66,8 @@ public class MessageProcessingService {
   private final AtomicLong lagSumMs = new AtomicLong(0);
   private final AtomicLong lagCount = new AtomicLong(0);
 
-  public MessageProcessingService(RedisPublisher redisPublisher, MessageBuffer messageBuffer,
+  public MessageProcessingService(RedisPublisher redisPublisher,
+      @Qualifier("routerMessageBuffer") MessageBuffer messageBuffer,
       StringRedisTemplate redisTemplate) {
     this.redisPublisher = redisPublisher;
     this.messageBuffer = messageBuffer;

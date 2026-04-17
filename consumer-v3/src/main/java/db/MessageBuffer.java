@@ -3,20 +3,17 @@ package db;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
 import model.BroadcastMessage;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
 
 /**
  * Shared in-memory buffer between consumer threads and DB writer threads.
  * Backed by a bounded blocking queue — if full, offer() returns false
  * and the message is dropped.
  */
-@Component
 public class MessageBuffer {
 
   private final LinkedBlockingQueue<BroadcastMessage> queue;
 
-  public MessageBuffer(@Value("${db.writer.buffer-capacity}") int capacity) {
+  public MessageBuffer(int capacity) {
     this.queue = new LinkedBlockingQueue<>(capacity);
   }
 

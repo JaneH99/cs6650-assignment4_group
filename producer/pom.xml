@@ -67,12 +67,6 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-aop</artifactId>
     </dependency>
-
-    <!-- Actuator: 暴露 /actuator/health 端点，供 Docker healthcheck 使用 -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-actuator</artifactId>
-    </dependency>
   </dependencies>
 
   <build>

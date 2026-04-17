@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.ParameterizedPreparedStatementSetter;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 @Component
 public class MessageRepository {
@@ -31,6 +32,7 @@ public class MessageRepository {
    * Inserts a list of BroadcastMessage objects into the database in a batch.
    * @param msgs List of BroadcastMessage to insert
    */
+  @Transactional
   public void batchInsert(List<BroadcastMessage> msgs) {
     jdbc.batchUpdate(SQL, msgs, msgs.size(), new ParameterizedPreparedStatementSetter<BroadcastMessage>() {
       @Override

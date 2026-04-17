@@ -17,7 +17,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.SmartLifecycle;
-import org.springframework.stereotype.Component;
 
 /**
  * Write-behind DB writer. Runs a fixed configurable thread pool where each thread continuously:
@@ -28,7 +27,6 @@ import org.springframework.stereotype.Component;
  *
  * Phase = MAX_VALUE - 1: starts before RoomConsumer, stops after RoomConsumer,
  */
-@Component
 public class DatabaseWriter implements SmartLifecycle {
 
   private static final Logger log = LoggerFactory.getLogger(DatabaseWriter.class);
