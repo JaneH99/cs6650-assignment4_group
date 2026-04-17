@@ -6,17 +6,14 @@ import java.util.List;
 import model.BroadcastMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
-
-import javax.sql.DataSource;
 
 /**
  * Tests DB write throughput at batch sizes: 100, 500, 1000, 5000.
- * Tests both DB1 (rooms 1-10) and DB2 (rooms 11-20).
  * Messages are pre-generated before timing starts — generation cost excluded.
  * Only runs when db.batch-size-test.enabled=true.
  *
@@ -30,24 +27,21 @@ public class BatchSizeTest implements CommandLineRunner {
   private static final Logger log = LoggerFactory.getLogger(BatchSizeTest.class);
   private static final int[] BATCH_SIZES = {100, 500, 1000, 5000};
 
-  private final MessageRepository db1Repository;
-  private final MessageRepository db2Repository;
+  private final MessageRepository repository;
+  private final JdbcTemplate jdbc;
 
   @Value("${db.batch-size-test.total-messages:500000}")
   private int totalMessages;
 
-  public BatchSizeTest(
-      @Qualifier("dataSource1") DataSource dataSource1,
-      @Qualifier("dataSource2") DataSource dataSource2) {
-    this.db1Repository = new MessageRepository(dataSource1);
-    this.db2Repository = new MessageRepository(dataSource2);
+  public BatchSizeTest(MessageRepository repository, JdbcTemplate jdbc) {
+    this.repository = repository;
+    this.jdbc = jdbc;
   }
 
   @Override
   public void run(String... args) {
     log.info("=================================================");
     log.info("[BATCH SIZE TEST] total messages per run: {}", totalMessages);
-    log.info("[BATCH SIZE TEST] Testing both DB1 and DB2");
     log.info("=================================================");
 
     // Pre-generate all messages once — excluded from timing
@@ -55,22 +49,11 @@ public class BatchSizeTest implements CommandLineRunner {
     List<BroadcastMessage> allMessages = generateMessages(totalMessages);
     log.info("[BATCH SIZE TEST] Generation complete. Starting tests...");
 
-    // Test DB1
-    log.info("");
-    log.info("========== DB1 (rooms 1-10) ==========");
     log.info("[BATCH SIZE TEST] batchSize | duration(ms) | avgMsgLatency(ms) | throughput(msg/s)");
-    for (int batchSize : BATCH_SIZES) {
-      truncate(db1Repository);
-      runTest(allMessages, batchSize, db1Repository, "DB1");
-    }
 
-    // Test DB2
-    log.info("");
-    log.info("========== DB2 (rooms 11-20) ==========");
-    log.info("[BATCH SIZE TEST] batchSize | duration(ms) | avgMsgLatency(ms) | throughput(msg/s)");
     for (int batchSize : BATCH_SIZES) {
-      truncate(db2Repository);
-      runTest(allMessages, batchSize, db2Repository, "DB2");
+      truncate();
+      runTest(allMessages, batchSize);
     }
 
     log.info("=================================================");
@@ -78,7 +61,11 @@ public class BatchSizeTest implements CommandLineRunner {
     log.info("=================================================");
   }
 
-  private void runTest(List<BroadcastMessage> messages, int batchSize, MessageRepository repository, String dbName) {
+  /**
+   * Splits pre-generated messages into batches of batchSize and inserts them to DB.
+   * Timer starts immediately — no message generation inside.
+   */
+  private void runTest(List<BroadcastMessage> messages, int batchSize) {
     int batches = 0;
     long totalBatchLatency = 0;
     long start = System.currentTimeMillis();
@@ -95,8 +82,8 @@ public class BatchSizeTest implements CommandLineRunner {
     long throughput = (totalMessages * 1000L) / duration;
     long avgMsgLatencyMs = batches > 0 ? totalBatchLatency / batches : 0;
 
-    log.info("[BATCH SIZE TEST] {} batchSize={} duration={}ms avgMsgLatency={}ms throughput={}msg/sec",
-        dbName, batchSize, duration, avgMsgLatencyMs, throughput);
+    log.info("[BATCH SIZE TEST] batchSize={} duration={}ms avgMsgLatency={}ms throughput={}msg/sec",
+        batchSize, duration, avgMsgLatencyMs, throughput);
   }
 
   private List<BroadcastMessage> generateMessages(int count) {
@@ -113,7 +100,7 @@ public class BatchSizeTest implements CommandLineRunner {
     return messages;
   }
 
-  private void truncate(MessageRepository repository) {
-    repository.truncate();
+  private void truncate() {
+    jdbc.execute("TRUNCATE TABLE messages");
   }
 }

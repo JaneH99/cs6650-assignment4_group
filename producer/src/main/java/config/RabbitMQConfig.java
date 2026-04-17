@@ -30,7 +30,7 @@ public class RabbitMQConfig {
   @Value("${spring.rabbitmq.host}")
   private String host;
 
-  @Value("${spring.rabbitmq2.host}")
+  @Value("${spring.rabbitmq2.host:${spring.rabbitmq.host}}")
   private String host2;
 
   @Value("${spring.rabbitmq.username:guest}")

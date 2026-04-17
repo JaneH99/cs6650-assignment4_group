@@ -14,10 +14,7 @@ import service.MessageProcessingService;
 
 /**
  * Configures RabbitMQ topology and the RoomConsumer bean.
- *
- * Topology is declared Idempotently on startup.
- * Both Message Consumer and Message Producer declare the same exchange/queues with the same args, so whichever
- * starts first wins; the second is a no-op. If it is manually or automatically declared in RabbitMQ, both of them will be no-op
+ * Uses a single RabbitMQ connection for all rooms.
  */
 @Configuration
 public class RabbitMQConfig {
@@ -26,9 +23,6 @@ public class RabbitMQConfig {
 
   @Value("${spring.rabbitmq.host}")
   private String host;
-
-  @Value("${spring.rabbitmq2.host}")
-  private String host2;
 
   @Value("${spring.rabbitmq.username:guest}")
   private String username;
@@ -45,12 +39,6 @@ public class RabbitMQConfig {
   @Value("${rabbitmq.rooms.end:20}")
   private int roomsEnd;
 
-  @Value("${rabbitmq.rooms2.start:11}")
-  private int roomsStart2;
-
-  @Value("${rabbitmq.rooms2.end:20}")
-  private int roomsEnd2;
-
   @Value("${rabbitmq.queue.message-ttl:60000}")
   private int messageTtl;
 
@@ -63,22 +51,16 @@ public class RabbitMQConfig {
   @Value("${rabbitmq.consumer.prefetch:20}")
   private int prefetchCount;
 
-  /**
-   * Declares topology (exchange + queues + bindings) using a temporary connection.
-   * Separate from the consumer connection so startup failures are isolated.
-   * Make sure everything is declared before RoomConsumer starts
-   */
   @Bean
   public RoomConsumer roomConsumer(MessageProcessingService processingService) throws Exception {
-    declareTopologyForRange(host, roomsStart, roomsEnd);
-    declareTopologyForRange(host2, roomsStart2, roomsEnd2);
-    return new RoomConsumer(host, host2, username, password,
+    declareTopology(host, roomsStart, roomsEnd);
+    return new RoomConsumer(host, username, password,
         consumerThreads, prefetchCount,
-        roomsStart, roomsEnd, roomsStart2, roomsEnd2,
+        roomsStart, roomsEnd,
         processingService);
   }
 
-  private void declareTopologyForRange(String targetHost, int start, int end) throws Exception {
+  private void declareTopology(String targetHost, int start, int end) throws Exception {
     ConnectionFactory factory = new ConnectionFactory();
     factory.setHost(targetHost);
     factory.setUsername(username);

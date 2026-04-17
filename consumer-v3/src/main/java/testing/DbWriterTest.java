@@ -5,6 +5,7 @@ import model.BroadcastMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -33,7 +34,7 @@ public class DbWriterTest implements CommandLineRunner {
   @Value("${db.writer.flush-interval-ms:500}")
   private long flushIntervalMs;
 
-  public DbWriterTest(MessageBuffer buffer, JdbcTemplate jdbc) {
+  public DbWriterTest(@Qualifier("routerMessageBuffer") MessageBuffer buffer, JdbcTemplate jdbc) {
     this.buffer = buffer;
     this.jdbc = jdbc;
   }

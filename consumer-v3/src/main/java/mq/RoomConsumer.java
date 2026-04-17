@@ -22,17 +22,14 @@ import service.MessageProcessingService;
  * Consumes messages from per-room RabbitMQ queues and delegates to
  * MessageProcessingService for Redis publish → ACK/NACK.
  *
- * This consumer connects to TWO RabbitMQ instances:
- *   Connection-1 → rooms 1-10 (host)
- *   Connection-2 → rooms 11-20 (host2)
- * Each connection gets its own independent channel pool.
+ * Uses a single RabbitMQ connection for all rooms.
  *
  * Batch processing:
  *   Messages accumulate in a per-channel ChannelBatch. The batch flushes when:
  *   it reaches BATCH_SIZE, or the periodic flusher fires (every FLUSH_INTERVAL_MS).
  *
- * Room assignment within each connection (round-robin):
- *   effectiveChannels = min(consumerThreads, numRoomsPerConnection)
+ * Room assignment (round-robin):
+ *   effectiveChannels = min(consumerThreads, numRooms)
  *   Channel i handles all rooms where (roomId - start) % effectiveChannels == i
  *
  * SmartLifecycle (phase = MAX_VALUE):
@@ -44,20 +41,15 @@ public class RoomConsumer implements SmartLifecycle {
   private static final Logger log = LoggerFactory.getLogger(RoomConsumer.class);
 
   private final String host;
-  private final String host2;
   private final String username;
   private final String password;
   private final int consumerThreads;
   private final int prefetchCount;
   private final int roomsStart;
   private final int roomsEnd;
-  private final int roomsStart2;
-  private final int roomsEnd2;
   private final MessageProcessingService processingService;
 
-  // Flush when batch reaches this size (must be < prefetchCount to avoid deadlock)
   private static final int BATCH_SIZE = 40;
-  // Flush partial batches at this interval to prevent unACKed message buildup
   private static final long FLUSH_INTERVAL_MS = 60;
 
   private final List<Connection> connections = new ArrayList<>();
@@ -66,84 +58,60 @@ public class RoomConsumer implements SmartLifecycle {
   private ScheduledExecutorService batchFlusher;
   private volatile boolean running = false;
 
-  public RoomConsumer(String host, String host2, String username, String password,
+  public RoomConsumer(String host, String username, String password,
       int consumerThreads, int prefetchCount,
       int roomsStart, int roomsEnd,
-      int roomsStart2, int roomsEnd2,
       MessageProcessingService processingService) {
     this.host = host;
-    this.host2 = host2;
     this.username = username;
     this.password = password;
     this.consumerThreads = consumerThreads;
     this.prefetchCount = prefetchCount;
     this.roomsStart = roomsStart;
     this.roomsEnd = roomsEnd;
-    this.roomsStart2 = roomsStart2;
-    this.roomsEnd2 = roomsEnd2;
     this.processingService = processingService;
   }
 
   @Override
   public void start() {
     try {
-      // Connection-1 → RabbitMQ-1 (rooms 1-10)
-      startConnection(host, roomsStart, roomsEnd, "conn-1");
-      // Connection-2 → RabbitMQ-2 (rooms 11-20)
-      startConnection(host2, roomsStart2, roomsEnd2, "conn-2");
+      ConnectionFactory factory = new ConnectionFactory();
+      factory.setHost(host);
+      factory.setUsername(username);
+      factory.setPassword(password);
+      factory.setSharedExecutor(Executors.newFixedThreadPool(consumerThreads));
 
-      // Periodically flush partial batches so they don't sit unACKed
+      Connection conn = factory.newConnection("consumer");
+      connections.add(conn);
+
+      int effectiveChannels = Math.min(consumerThreads, roomsEnd - roomsStart + 1);
+      for (int i = 0; i < effectiveChannels; i++) {
+        startConsumerChannel(conn, i, effectiveChannels);
+      }
+
       batchFlusher = Executors.newSingleThreadScheduledExecutor(
           r -> new Thread(r, "batch-flusher"));
       batchFlusher.scheduleAtFixedRate(this::flushAllBatches,
           FLUSH_INTERVAL_MS, FLUSH_INTERVAL_MS, TimeUnit.MILLISECONDS);
 
       running = true;
-      log.info("RoomConsumer started: 2 connections, conn-1 rooms={}-{} conn-2 rooms={}-{}",
-          roomsStart, roomsEnd, roomsStart2, roomsEnd2);
+      log.info("RoomConsumer started: host={} rooms={}-{} channels={}",
+          host, roomsStart, roomsEnd, effectiveChannels);
     } catch (IOException | TimeoutException e) {
       throw new RuntimeException("Failed to start RoomConsumer", e);
     }
   }
 
-  /**
-   * Creates one RabbitMQ Connection and starts consumer channels for its assigned rooms.
-   */
-  private void startConnection(String targetHost, int start, int end, String connName)
-      throws IOException, TimeoutException {
-    ConnectionFactory factory = new ConnectionFactory();
-    factory.setHost(targetHost);
-    factory.setUsername(username);
-    factory.setPassword(password);
-    factory.setSharedExecutor(Executors.newFixedThreadPool(consumerThreads));
-
-    Connection conn = factory.newConnection(connName);
-    connections.add(conn);
-
-    int effectiveChannels = Math.min(consumerThreads, end - start + 1);
-    for (int i = 0; i < effectiveChannels; i++) {
-      startConsumerChannel(conn, i, effectiveChannels, start, end);
-    }
-    log.info("Connection {} started: host={} rooms={}-{} channels={}",
-        connName, targetHost, start, end, effectiveChannels);
-  }
-
-  /**
-   * Creates one AMQP channel and subscribes it to its assigned room(s).
-   * Each channel gets a ChannelBatch that accumulates messages until
-   * BATCH_SIZE is reached or the periodic flusher fires.
-   */
-  private void startConsumerChannel(Connection conn, int index, int effectiveChannels,
-      int roomStart, int roomEnd) throws IOException {
+  private void startConsumerChannel(Connection conn, int index, int effectiveChannels)
+      throws IOException {
     Channel channel = conn.createChannel();
     channel.basicQos(prefetchCount);
 
     ChannelBatch batch = new ChannelBatch(channel, processingService);
     batches.add(batch);
 
-    for (int roomId = roomStart; roomId <= roomEnd; roomId++) {
-      // Round-robin assignment: channel i handles rooms where (roomId - roomStart) % effectiveChannels == i
-      if ((roomId - roomStart) % effectiveChannels == index) {
+    for (int roomId = roomsStart; roomId <= roomsEnd; roomId++) {
+      if ((roomId - roomsStart) % effectiveChannels == index) {
         String queueName = "room." + roomId;
         channel.basicConsume(queueName, false,
             new DefaultConsumer(channel) {
@@ -184,11 +152,7 @@ public class RoomConsumer implements SmartLifecycle {
 
   @Override public boolean isRunning() { return running; }
 
-  /**
-   * Holds per-channel batch state.
-   */
   private static class ChannelBatch {
-
     private final Channel channel;
     private final MessageProcessingService processingService;
     private final List<Long> deliveryTags = new ArrayList<>(BATCH_SIZE);
